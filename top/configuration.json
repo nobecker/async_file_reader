@@ -1,0 +1,28 @@
+{
+  "proposed_arrangements": [
+    {
+      "position": 0,
+      "option": "OPTION_1"
+    },
+    {
+      "position": 1,
+      "option": "OPTION_2"
+    },
+    {
+      "position": 2,
+      "option": null
+    },
+    {
+      "position": 3,
+      "option": "OPTION_4"
+    },
+    {
+      "position": 4,
+      "option": null
+    },
+    {
+      "position": 5,
+      "option": "OPTION_3"
+    }
+  ]
+}
