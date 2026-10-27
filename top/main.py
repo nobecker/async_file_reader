@@ -1,9 +1,11 @@
 import json
 import sys
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Optional
 
-from PyQt5.QtCore import Qt, QMimeData, QPoint
-from PyQt5.QtGui import QDrag, QPixmap
+from PyQt5.QtCore import Qt, QMimeData, QPoint, QRect
+from PyQt5.QtGui import QColor, QDrag, QPainter, QPixmap
 from PyQt5.QtWidgets import (
     QApplication,
     QGridLayout,
@@ -17,9 +19,15 @@ from PyQt5.QtWidgets import (
 )
 
 
-OPTIONS = [f"OPTION_{number}" for number in range(1, 7)]
 BOX_SIZE = 125
 VISIBLE_BOXES = 4
+
+
+@dataclass(frozen=True)
+class ConfigurableTile:
+    image: QPixmap
+    title: str
+    name: str
 
 
 class DragLabel(QLabel):
@@ -27,20 +35,69 @@ class DragLabel(QLabel):
 
     MIME_TYPE = "application/x-option-wizard-option"
 
-    def __init__(self, text: str, *, drop_callback=None, visibility_callback=None, parent=None):
-        super().__init__(text, parent)
+    def __init__(
+        self,
+        tile: Optional[ConfigurableTile] = None,
+        *,
+        drop_callback=None,
+        visibility_callback=None,
+        proposed=False,
+        parent=None,
+    ):
+        super().__init__(parent)
+        self.tile = tile
         self.drop_callback = drop_callback
         self.visibility_callback = visibility_callback
         self.drag_start = QPoint()
+        self.proposed = proposed
+        self.drop_highlighted = False
         self.setAlignment(Qt.AlignCenter)
         self.setFixedSize(BOX_SIZE, BOX_SIZE)
-        self.default_style = (
-            "QLabel { background: #f2f5f8; border: 2px solid #9aa7b2; "
-            "border-radius: 8px; font-size: 15px; font-weight: 600; }"
-            "QLabel:hover { border-color: #2678c8; }"
-        )
-        self.setStyleSheet(self.default_style)
         self.setAcceptDrops(drop_callback is not None)
+
+    @property
+    def tile_name(self):
+        return self.tile.name if self.tile else None
+
+    def set_tile(self, tile: Optional[ConfigurableTile]):
+        self.tile = tile
+        self.update()
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        bounds = self.rect().adjusted(1, 1, -1, -1)
+        if self.drop_highlighted:
+            background, border = QColor("#c9f2d2"), QColor("#219653")
+        elif self.proposed:
+            background, border = QColor("#e7f2ff"), QColor("#2678c8")
+        else:
+            background, border = QColor("#f2f5f8"), QColor("#9aa7b2")
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(background)
+        painter.drawRoundedRect(bounds, 8, 8)
+
+        if self.tile and not self.tile.image.isNull():
+            image_box = bounds.adjusted(8, 8, -8, -8)
+            image = self.tile.image.scaled(
+                image_box.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation
+            )
+            image_x = bounds.center().x() - image.width() // 2
+            image_y = bounds.center().y() - image.height() // 2
+            painter.drawPixmap(image_x, image_y, image)
+
+        title = self.tile.title if self.tile else ""
+        if title:
+            title_rect = QRect(bounds.left() + 3, bounds.bottom() - 29, bounds.width() - 6, 25)
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(QColor(0, 0, 0, 165) if self.tile and not self.tile.image.isNull() else background)
+            painter.drawRoundedRect(title_rect, 4, 4)
+            painter.setPen(Qt.white if self.tile and not self.tile.image.isNull() else QColor("#25313b"))
+            painter.drawText(title_rect, Qt.AlignCenter, title)
+
+        painter.setBrush(Qt.NoBrush)
+        painter.setPen(border if not self.drop_highlighted else QColor("#219653"))
+        painter.drawRoundedRect(bounds, 8, 8)
 
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton:
@@ -48,12 +105,12 @@ class DragLabel(QLabel):
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event):
-        if not (event.buttons() & Qt.LeftButton) or not self.text():
+        if not (event.buttons() & Qt.LeftButton) or not self.tile_name:
             return
         if (event.pos() - self.drag_start).manhattanLength() < QApplication.startDragDistance():
             return
         mime = QMimeData()
-        mime.setData(self.MIME_TYPE, self.text().encode("utf-8"))
+        mime.setData(self.MIME_TYPE, self.tile_name.encode("utf-8"))
         drag = QDrag(self)
         drag.setMimeData(mime)
         preview = QPixmap(self.size())
@@ -72,22 +129,22 @@ class DragLabel(QLabel):
         if self.drop_callback and event.mimeData().hasFormat(self.MIME_TYPE):
             event.setDropAction(Qt.MoveAction)
             event.accept()
-            self.setStyleSheet(
-                "QLabel { background: #c9f2d2; border: 3px solid #219653; "
-                "border-radius: 8px; font-size: 15px; font-weight: 600; }"
-            )
+            self.drop_highlighted = True
+            self.update()
         else:
             event.ignore()
 
     def dragLeaveEvent(self, event):
-        self.setStyleSheet(self.default_style)
+        self.drop_highlighted = False
+        self.update()
         event.accept()
 
     def dropEvent(self, event):
         if self.drop_callback and event.mimeData().hasFormat(self.MIME_TYPE):
-            option = bytes(event.mimeData().data(self.MIME_TYPE)).decode("utf-8")
-            self.drop_callback(option)
-            self.setStyleSheet(self.default_style)
+            name = bytes(event.mimeData().data(self.MIME_TYPE)).decode("utf-8")
+            self.drop_callback(name)
+            self.drop_highlighted = False
+            self.update()
             event.setDropAction(Qt.MoveAction)
             event.accept()
 
@@ -147,12 +204,16 @@ class OptionsDropPanel(QWidget):
 
 
 class OrderWizard(QWidget):
-    def __init__(self, save_path: Path):
+    def __init__(self, tiles: list[ConfigurableTile], save_path: Path):
         super().__init__()
+        if len({tile.name for tile in tiles}) != len(tiles):
+            raise ValueError("ConfigurableTile names must be unique.")
+        self.tiles = list(tiles)
+        self.tiles_by_name = {tile.name: tile for tile in tiles}
         self.save_path = save_path
-        self.order = [None] * len(OPTIONS)
+        self.order = [None] * len(self.tiles)
         self.page = 0
-        self.page_count = (len(self.order) + VISIBLE_BOXES - 1) // VISIBLE_BOXES
+        self.page_count = max(1, (len(self.order) + VISIBLE_BOXES - 1) // VISIBLE_BOXES)
         self.targets = []
         self.option_tiles = []
 
@@ -186,20 +247,14 @@ class OrderWizard(QWidget):
         self.box_row.addStretch(1)
         for offset in range(VISIBLE_BOXES):
             target = DragLabel(
-                "",
-                drop_callback=lambda option, slot=offset: self.place_option(
-                    self.page * VISIBLE_BOXES + slot, option
+                drop_callback=lambda name, slot=offset: self.place_option(
+                    self.page * VISIBLE_BOXES + slot, name
                 ),
                 visibility_callback=lambda slot=offset: (
                     self.page * VISIBLE_BOXES + slot < len(self.order)
                 ),
+                proposed=True,
             )
-            target.default_style = (
-                "QLabel { background: #e7f2ff; border: 2px solid #2678c8; "
-                "border-radius: 8px; font-size: 15px; font-weight: 600; }"
-                "QLabel:hover { background: #d7eaff; }"
-            )
-            target.setStyleSheet(target.default_style)
             self.box_row.addWidget(target)
             self.targets.append(target)
         self.box_row.addStretch(1)
@@ -215,11 +270,11 @@ class OrderWizard(QWidget):
         self.option_grid = QGridLayout(options_content)
         self.option_grid.setHorizontalSpacing(12)
         self.option_grid.setVerticalSpacing(12)
-        for index, option in enumerate(OPTIONS):
+        for index, configurable_tile in enumerate(self.tiles):
             tile = DragLabel(
-                option,
+                configurable_tile,
                 drop_callback=self.return_option,
-                visibility_callback=lambda name=option: name not in self.order,
+                visibility_callback=lambda name=configurable_tile.name: name not in self.order,
             )
             self.option_grid.addWidget(tile, index // 3, index % 3)
             self.option_tiles.append(tile)
@@ -243,7 +298,8 @@ class OrderWizard(QWidget):
         for offset, target in enumerate(self.targets):
             position = start + offset
             is_valid_position = position < len(self.order)
-            target.setText(self.order[position] or "" if is_valid_position else "")
+            name = self.order[position] if is_valid_position else None
+            target.set_tile(self.tiles_by_name.get(name))
             target.setVisible(is_valid_position)
         self.refresh_options()
         self.page_label.setText(f"Page {self.page + 1} of {self.page_count}")
@@ -252,23 +308,26 @@ class OrderWizard(QWidget):
 
     def refresh_options(self):
         for tile in self.option_tiles:
-            tile.setVisible(tile.text() not in self.order)
+            tile.setVisible(tile.tile_name not in self.order)
 
-    def place_option(self, target_index: int, option: str):
-        if option not in OPTIONS:
+    def place_option(self, target_index: int, name: str):
+        if name not in self.tiles_by_name or not 0 <= target_index < len(self.order):
             return
-        source_index = self.order.index(option) if option in self.order else None
+        source_index = self.order.index(name) if name in self.order else None
         if self.order[target_index] is None:
-            self.order[target_index] = option
+            self.order[target_index] = name
             if source_index is not None and source_index != target_index:
                 self.order[source_index] = None
-            self.feedback_label.setText(f"Moved {option} to proposed arrangement {target_index + 1}.")
+            self.feedback_label.setText(
+                f"Moved {self.tiles_by_name[name].title} to proposed arrangement {target_index + 1}."
+            )
         else:
             replaced = self.order[target_index]
             if source_index is None:
-                self.order[target_index] = option
+                self.order[target_index] = name
                 self.feedback_label.setText(
-                    f"Placed {option} in arrangement {target_index + 1}; {replaced} returned to Options."
+                    f"Placed {self.tiles_by_name[name].title} in arrangement {target_index + 1}; "
+                    f"{self.tiles_by_name[replaced].title} returned to Options."
                 )
             else:
                 self.order[target_index], self.order[source_index] = (
@@ -276,17 +335,18 @@ class OrderWizard(QWidget):
                     self.order[target_index],
                 )
                 self.feedback_label.setText(
-                    f"Swapped {option} with {replaced} in proposed arrangement {target_index + 1}."
+                    f"Swapped {self.tiles_by_name[name].title} with "
+                    f"{self.tiles_by_name[replaced].title} in proposed arrangement {target_index + 1}."
                 )
         self.refresh_boxes()
 
-    def return_option(self, option: str):
-        if option not in self.order:
+    def return_option(self, name: str):
+        if name not in self.order:
             return
-        position = self.order.index(option)
+        position = self.order.index(name)
         self.order[position] = None
         self.feedback_label.setText(
-            f"Returned {option} from proposed arrangement {position + 1} to Options."
+            f"Returned {self.tiles_by_name[name].title} from proposed arrangement {position + 1} to Options."
         )
         self.refresh_boxes()
 
@@ -320,7 +380,17 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Option Order Wizard")
-        self.setCentralWidget(OrderWizard(Path(__file__).with_name("configuration.json")))
+        sample_tiles = []
+        colors = ["#4d83c7", "#57a773", "#e29a4a", "#9b75c7", "#d26d72", "#4da9ad"]
+        for number, color in enumerate(colors, start=1):
+            image = QPixmap(BOX_SIZE, BOX_SIZE)
+            image.fill(QColor(color))
+            sample_tiles.append(
+                ConfigurableTile(image=image, title=f"OPTION_{number}", name=f"OPTION_{number}")
+            )
+        self.setCentralWidget(
+            OrderWizard(sample_tiles, Path(__file__).with_name("configuration.json"))
+        )
         self.setMinimumWidth(780)
 
 
